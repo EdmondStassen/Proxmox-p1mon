@@ -1,0 +1,17 @@
+services:
+  p1monitor:
+    hostname: p1mon
+    image: mclaassen/p1mon
+    ports:
+      - "81:80"
+    volumes:
+      - ./alldata/data:/p1mon/data
+      - ./alldata/mnt/usb:/p1mon/mnt/usb
+      - ./alldata/mnt/ramdisk:/p1mon/mnt/ramdisk
+    tmpfs:
+      - /run
+      - /tmp
+    restart: unless-stopped
+    # Optioneel:
+    # environment:
+    #   - SOCAT_CONF=TCP4:192.168.1.50:23
