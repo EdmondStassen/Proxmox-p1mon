@@ -8,20 +8,21 @@ set -euo pipefail
 
 ############# Config (pas gerust aan) #############
 CTID="${CTID:-991}"                   # Container ID
-HOSTNAME="${HOSTNAME:-p1monitor}"         # Hostname
+HOSTNAME="${HOSTNAME:-p1mon}"         # Hostname
 MEMORY_MB="${MEMORY_MB:-1024}"        # RAM in MB
 CORES="${CORES:-2}"                   # vCPU's
 DISK_GB="${DISK_GB:-8}"               # Rootfs grootte in GB
 BRIDGE="${BRIDGE:-vmbr0}"             # Netwerk bridge
-VLAN_TAG="${VLAN_TAG:-}"              # bv. 20  (leeg = geen VLAN)
+VLAN_TAG="${VLAN_TAG:-}"              # VLAN tag (optioneel)
 STATIC_IP="${STATIC_IP:-}"            # bv. 192.168.1.123/24  (leeg = DHCP)
-GATEWAY_IP="${GATEWAY_IP:-}"          # bv. 192.168.1.1       (alleen bij statisch IP)
+GATEWAY_IP="${GATEWAY_IP:-}"          # bv. 192.168.1.1
 NAMESERVER="${NAMESERVER:-1.1.1.1}"   # DNS in CT
 STORAGE="${STORAGE:-local-lvm}"       # Opslag voor rootfs
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"  # Voor templates
 P1MON_HTTP_PORT="${P1MON_HTTP_PORT:-81}"       # Externe poort
 P1MON_DIR="${P1MON_DIR:-/opt/p1mon}"           # Map in CT
-SOCAT_CONF="${SOCAT_CONF:-}"          # Optioneel: bv. TCP4:192.168.1.50:23
+SERIAL_DEVICE="${SERIAL_DEVICE:-/dev/ttyUSB0}" # Seriële poort op host
+SOCAT_CONF="${SOCAT_CONF:-}"                   # Optioneel voor TCP-bron
 ###################################################
 
 # --- Helpers ---
@@ -88,6 +89,33 @@ create_ct() {
   fi
 }
 
+add_serial_device() {
+  info "Voeg seriële poort toe aan CT..."
+  if [[ ! -e "$SERIAL_DEVICE" ]]; then
+    die "Seriële device ${SERIAL_DEVICE} bestaat niet op de host."
+  fi
+
+  local major minor
+  major=$(stat -c '%t' "$SERIAL_DEVICE" | xargs printf "%d")
+  minor=$(stat -c '%T' "$SERIAL_DEVICE" | xargs printf "%d")
+
+  # Bepaal major device nummer (188 = USB, 166 = ACM)
+  case "$SERIAL_DEVICE" in
+    *ttyUSB*) major=188 ;;
+    *ttyACM*) major=166 ;;
+  esac
+
+  # Voeg regels toe aan LXC config
+  local conf="/etc/pve/lxc/${CTID}.conf"
+  if ! grep -q "$SERIAL_DEVICE" "$conf"; then
+    echo "lxc.cgroup2.devices.allow: c ${major}:* rwm" >> "$conf"
+    echo "lxc.mount.entry: ${SERIAL_DEVICE} ${SERIAL_DEVICE} none bind,create=file" >> "$conf"
+    ok "Seriële device ${SERIAL_DEVICE} toegevoegd aan config."
+  else
+    ok "Seriële device stond al in config."
+  fi
+}
+
 start_ct() {
   if [[ "$(pct status "$CTID" | awk '{print $2}')" != "running" ]]; then
     info "Start CT $CTID..."
@@ -128,13 +156,15 @@ services:
       - ./alldata/data:/p1mon/data
       - ./alldata/mnt/usb:/p1mon/mnt/usb
       - ./alldata/mnt/ramdisk:/p1mon/mnt/ramdisk
+    devices:
+      - \"${SERIAL_DEVICE}:${SERIAL_DEVICE}\"
     tmpfs:
       - /run
       - /tmp
     restart: unless-stopped
 YAML"
 
-  # Optioneel: voeg SOCAT_CONF toe
+  # Voeg SOCAT_CONF toe (optioneel)
   if [[ -n "$SOCAT_CONF" ]]; then
     info "Voeg SOCAT_CONF toe (${SOCAT_CONF})..."
     ct_exec "sed -i '\$a\\    environment:\\n      - SOCAT_CONF=${SOCAT_CONF}' ${P1MON_DIR}/docker-compose.yml"
@@ -153,8 +183,8 @@ print_access_info() {
   echo "============================================"
   echo "✅  P1 Monitor draait!"
   echo "URL: http://${ip}:${P1MON_HTTP_PORT}"
+  echo "Seriële poort: ${SERIAL_DEVICE}"
   echo "CT beheren: pct enter ${CTID}"
-  echo "Docker beheer: cd ${P1MON_DIR} && docker compose ps"
   echo "============================================"
 }
 
@@ -163,6 +193,7 @@ main() {
   tmpl="$(pick_debian12_template)"
   ensure_template_present "$tmpl"
   create_ct "$tmpl"
+  add_serial_device
   start_ct
   install_docker_in_ct
   prepare_p1mon_dirs
