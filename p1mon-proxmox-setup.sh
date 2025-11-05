@@ -4,6 +4,14 @@
 # Zie Marcel Claassen: https://marcel.duketown.com/p1-monitor-docker-versie/
 # ===========================================================
 
+#!/usr/bin/env bash
+# ===========================================================
+# P1 Monitor Helper Script voor Proxmox
+# -----------------------------------------------------------
+# LXC (Debian 12) + Docker + P1 Monitor, met seriële poort.
+# Past automatisch de hostname aan en kiest de volgende vrije CTID.
+# ===========================================================
+
 set -euo pipefail
 
 ############# Config #############
@@ -226,3 +234,13 @@ main() {
   tmpl="$(pick_debian12_template)"
   ensure_template_present "$tmpl"
   create_ct "$tmpl"
+  add_serial_device
+  start_ct
+  install_docker_in_ct
+  prepare_p1mon_dirs
+  write_compose_file
+  bring_up_stack
+  print_access_info
+}
+
+main "$@"
