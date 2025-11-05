@@ -4,40 +4,50 @@
 # Zie Marcel Claassen: https://marcel.duketown.com/p1-monitor-docker-versie/
 # ===========================================================
 
+#!/usr/bin/env bash
+# ===========================================================
+# P1 Monitor Helper Script voor Proxmox
+# -----------------------------------------------------------
+# Maakt automatisch een Debian 12 LXC, installeert Docker,
+# zet P1 Monitor op met een virtuele seriële poort via socat.
+# -----------------------------------------------------------
+# Auteur: ChatGPT (GPT-5)
+# ===========================================================
+
 set -euo pipefail
 
 ############# Config #############
-CTID="${CTID:-}"
-HOSTNAME="${HOSTNAME:-p1monitor}"
-MEMORY_MB="${MEMORY_MB:-1024}"
-CORES="${CORES:-2}"
-DISK_GB="${DISK_GB:-8}"
-BRIDGE="${BRIDGE:-vmbr0}"
-VLAN_TAG="${VLAN_TAG:-}"
-STATIC_IP="${STATIC_IP:-}"
-GATEWAY_IP="${GATEWAY_IP:-}"
-NAMESERVER="${NAMESERVER:-1.1.1.1}"
-STORAGE="${STORAGE:-local-lvm}"
-TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
-P1MON_HTTP_PORT="${P1MON_HTTP_PORT:-81}"
-P1MON_DIR="${P1MON_DIR:-/opt/p1mon}"
+CTID="${CTID:-}"                    # Automatisch bepaald als leeg
+HOSTNAME="${HOSTNAME:-p1monitor}"   # Naam van de container
+MEMORY_MB="${MEMORY_MB:-1024}"      # RAM in MB
+CORES="${CORES:-2}"                 # CPU cores
+DISK_GB="${DISK_GB:-8}"             # Rootfs grootte in GB
+BRIDGE="${BRIDGE:-vmbr0}"           # Netwerk bridge
+VLAN_TAG="${VLAN_TAG:-}"            # Optioneel VLAN
+STATIC_IP="${STATIC_IP:-}"          # bv. 192.168.1.123/24  (leeg = DHCP)
+GATEWAY_IP="${GATEWAY_IP:-}"        # bv. 192.168.1.1
+NAMESERVER="${NAMESERVER:-1.1.1.1}" # DNS in CT
+STORAGE="${STORAGE:-local-lvm}"     # Opslag
+TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"  # Voor templates
+P1MON_HTTP_PORT="${P1MON_HTTP_PORT:-81}"       # Externe poort
 
-# De TCP-bron van je slimme meter
-# voorbeeld: TCP4:192.168.1.50:23
+# TCP-bron van je slimme-meter-gateway (PAS DIT AAN!)
 SOCAT_TARGET="${SOCAT_TARGET:-TCP4:192.168.1.50:23}"
 
-# Virtuele seriële poort binnen de container
+# Locaties in de container
+P1MON_DIR="${P1MON_DIR:-/opt/p1mon}"
 VIRTUAL_SERIAL="/dev/ttyUSB0"
 ##################################
 
 info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
-ok()   { echo -e "\033[1;32m[OK]\033[0m $*";  }
+ok()   { echo -e "\033[1;32m[OK]\033[0m $*"; }
 die()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; exit 1; }
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Vereiste command ontbreekt: $1"; }
+
 require_cmd pct
 
-# ---- Helper: kies volgende vrije CTID ----
+# ---- Automatische CTID ----
 autopick_ctid() {
   if command -v pvesh >/dev/null 2>&1; then
     pvesh get /cluster/nextid 2>/dev/null && return
@@ -63,15 +73,15 @@ if ! pveam list "$TEMPLATE_STORAGE" | awk '{print $2}' | grep -qx "$TEMPLATE"; t
   pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
-# ---- Container maken ----
+# ---- Container aanmaken ----
 NETCFG="name=eth0,bridge=${BRIDGE}"
 [[ -n "$VLAN_TAG" ]] && NETCFG="${NETCFG},tag=${VLAN_TAG}"
 [[ -n "$STATIC_IP" ]] && NETCFG="${NETCFG},ip=${STATIC_IP},gw=${GATEWAY_IP}" || NETCFG="${NETCFG},ip=dhcp"
 
 if pct status "$CTID" >/dev/null 2>&1; then
-  info "Container $CTID bestaat al, overslaan aanmaken..."
+  info "Container $CTID bestaat al, overslaan..."
 else
-  info "Maak CT $CTID aan..."
+  info "Maak container $CTID aan..."
   pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
     -hostname "$HOSTNAME" \
     -cores "$CORES" \
@@ -84,11 +94,10 @@ else
     -onboot 1
 fi
 
-pct start "$CTID" || die "Kan container niet starten."
-
+pct start "$CTID"
 ct_exec() { pct exec "$CTID" -- bash -lc "$*"; }
 
-# ---- Docker + SOCAT installeren ----
+# ---- Docker + socat ----
 info "Installeer Docker + socat in CT..."
 ct_exec "apt-get update -y && apt-get install -y ca-certificates curl gnupg socat"
 ct_exec "install -m 0755 -d /etc/apt/keyrings"
@@ -97,46 +106,46 @@ ct_exec "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyri
 ct_exec "apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"
 ok "Docker en socat geïnstalleerd."
 
-# ---- Virtuele poort aanmaken ----
-info "Maak virtuele seriële poort aan via socat..."
+# ---- Virtuele poort via socat ----
+info "Start virtuele seriële poort via socat..."
 ct_exec "nohup socat pty,link=${VIRTUAL_SERIAL},raw,echo=0 ${SOCAT_TARGET} &>/tmp/socat.log & disown"
 ct_exec "sleep 2"
-ct_exec "ls -l ${VIRTUAL_SERIAL}" || warn "Virtuele poort nog niet zichtbaar; check socat.log"
 
-# ---- P1 Monitor volumes ----
+# ---- P1 Monitor data directories ----
 ct_exec "mkdir -p ${P1MON_DIR}/alldata/{data,mnt/usb,mnt/ramdisk}"
 
 # ---- docker-compose.yml ----
-info "Schrijf docker-compose.yml..."
+info "Maak docker-compose.yml..."
 ct_exec "cat > ${P1MON_DIR}/docker-compose.yml <<'YAML'
 services:
   p1monitor:
     hostname: ${HOSTNAME}
     image: mclaassen/p1mon
     ports:
-      - "${P1MON_HTTP_PORT}:80"
+      - \"${P1MON_HTTP_PORT}:80\"
     volumes:
       - ./alldata/data:/p1mon/data
       - ./alldata/mnt/usb:/p1mon/mnt/usb
       - ./alldata/mnt/ramdisk:/p1mon/mnt/ramdisk
     devices:
-      - "${VIRTUAL_SERIAL}:${VIRTUAL_SERIAL}"
+      - \"${VIRTUAL_SERIAL}:${VIRTUAL_SERIAL}\"
     tmpfs:
       - /run
       - /tmp
     restart: unless-stopped
 YAML"
 
-# ---- Start container stack ----
-info "Start P1 Monitor..."
+# ---- Start P1 Monitor ----
+info "Start P1 Monitor container..."
 ct_exec "cd ${P1MON_DIR} && docker compose up -d"
 
-# ---- Toon IP ----
+# ---- Toon resultaat ----
 IP=$(pct exec "$CTID" -- bash -lc "hostname -I | awk '{print \$1}'" | tr -d '\r')
 echo
 echo "================================================="
 echo "✅  P1 Monitor draait!"
 echo "URL: http://${IP}:${P1MON_HTTP_PORT}"
-echo "Virtuele poort: ${VIRTUAL_SERIAL} (via socat → ${SOCAT_TARGET})"
+echo "Virtuele poort: ${VIRTUAL_SERIAL} (socat → ${SOCAT_TARGET})"
 echo "Container ID: ${CTID}"
+echo "CT beheren: pct enter ${CTID}"
 echo "================================================="
